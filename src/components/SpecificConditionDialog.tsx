@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Dialog,
   DialogTitle,
@@ -10,10 +10,12 @@ import {
   Box,
   IconButton,
   Chip,
+  Alert,
 } from '@mui/material';
 import { Close, Edit, Visibility } from '@mui/icons-material';
 import TreeBuilder from './TreeBuilder';
 import { TreeNode, FieldConfig } from '../types';
+import { validateTreeHasConditions, validateConditionComplete } from '../validations/conditionSchema';
 
 interface SpecificConditionDialogProps {
   open: boolean;
@@ -39,6 +41,45 @@ const SpecificConditionDialog: React.FC<SpecificConditionDialogProps> = ({
   onSave,
 }) => {
   const isViewMode = mode === 'view';
+  const [nameError, setNameError] = useState<string | null>(null);
+  const [conditionWarning, setConditionWarning] = useState<string | null>(null);
+
+  // Validate on change
+  useEffect(() => {
+    if (!isViewMode) {
+      // Validate name
+      if (name.trim() === '') {
+        setNameError('Tên điều kiện không được để trống');
+      } else if (name.length > 100) {
+        setNameError('Tên điều kiện không được quá 100 ký tự');
+      } else {
+        setNameError(null);
+      }
+
+      // Validate condition
+      if (!validateTreeHasConditions(condition)) {
+        setConditionWarning('Chưa có điều kiện nào được cấu hình');
+      } else {
+        const result = validateConditionComplete(condition);
+        if (!result.valid) {
+          setConditionWarning(result.message || 'Có điều kiện chưa đầy đủ thông tin');
+        } else {
+          setConditionWarning(null);
+        }
+      }
+    }
+  }, [name, condition, isViewMode]);
+
+  const handleSave = () => {
+    // Validate before save
+    if (name.trim() === '') {
+      setNameError('Tên điều kiện không được để trống');
+      return;
+    }
+    
+    onSave?.();
+    onClose();
+  };
 
   return (
     <Dialog
@@ -85,7 +126,7 @@ const SpecificConditionDialog: React.FC<SpecificConditionDialogProps> = ({
         {/* Tên điều kiện riêng */}
         <Box sx={{ mb: 3 }}>
           <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>
-            Tên điều kiện riêng
+            Tên điều kiện riêng <span style={{ color: 'red' }}>*</span>
           </Typography>
           {isViewMode ? (
             <Typography variant="body1" fontWeight={500}>
@@ -98,6 +139,8 @@ const SpecificConditionDialog: React.FC<SpecificConditionDialogProps> = ({
               fullWidth
               size="small"
               placeholder="Nhập tên điều kiện riêng"
+              error={!!nameError}
+              helperText={nameError}
             />
           )}
         </Box>
@@ -107,6 +150,13 @@ const SpecificConditionDialog: React.FC<SpecificConditionDialogProps> = ({
           <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>
             Logic điều kiện
           </Typography>
+          
+          {!isViewMode && conditionWarning && (
+            <Alert severity="warning" sx={{ mb: 2 }}>
+              {conditionWarning}
+            </Alert>
+          )}
+
           {isViewMode ? (
             <Box
               sx={{
@@ -140,12 +190,10 @@ const SpecificConditionDialog: React.FC<SpecificConditionDialogProps> = ({
         </Button>
         {!isViewMode && (
           <Button
-            onClick={() => {
-              onSave?.();
-              onClose();
-            }}
+            onClick={handleSave}
             variant="contained"
             color="primary"
+            disabled={!!nameError}
           >
             Lưu thay đổi
           </Button>
@@ -156,4 +204,3 @@ const SpecificConditionDialog: React.FC<SpecificConditionDialogProps> = ({
 };
 
 export default SpecificConditionDialog;
-

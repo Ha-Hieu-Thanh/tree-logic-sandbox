@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useForm, Controller, useFieldArray } from 'react-hook-form';
+import { yupResolver } from '@hookform/resolvers/yup';
 import {
     Container,
     Paper,
@@ -19,17 +20,26 @@ import {
     Divider,
     Collapse,
     IconButton,
+    CircularProgress,
+    Snackbar,
+    Backdrop,
+    Chip,
+    FormHelperText,
 } from '@mui/material';
 import {
     Save,
     CheckCircleOutline,
     ExpandMore,
     ExpandLess,
+    Refresh,
+    Error as ErrorIcon,
 } from '@mui/icons-material';
 import TreeBuilder from './components/TreeBuilder';
 import SpecificConditionTable from './components/SpecificConditionTable';
 import SpecificConditionDialog from './components/SpecificConditionDialog';
 import { generateSQL } from './utils/generateSQL';
+import { useConditions } from './hooks/useConditions';
+import { conditionFormSchema, validateTreeHasConditions } from './validations/conditionSchema';
 import { TreeNode, FieldConfig, ConditionFormData, SpecificCondition } from './types';
 
 // Custom MUI Theme
@@ -125,56 +135,9 @@ const createEmptyTree = (): TreeNode => ({
 
 // Default form values
 const defaultFormValues: ConditionFormData = {
-    generalName: 'Điều kiện lọc người dùng',
-    generalCondition: {
-        nodeType: "GROUP",
-        logicalOperator: "AND",
-        expanded: true,
-        children: [
-            {
-                nodeType: "CONDITION",
-                itemParamId: "1",
-                typeCheck: ">=",
-                paramValue: "18"
-            }
-        ]
-    },
-    specificConditions: [
-        {
-            id: '1',
-            name: 'Điều kiện VIP',
-            condition: {
-                nodeType: "GROUP",
-                logicalOperator: "AND",
-                expanded: true,
-                children: [
-                    {
-                        nodeType: "CONDITION",
-                        itemParamId: "3",
-                        typeCheck: "=",
-                        paramValue: "vip"
-                    }
-                ]
-            }
-        },
-        {
-            id: '2',
-            name: 'Điều kiện nhân viên mới',
-            condition: {
-                nodeType: "GROUP",
-                logicalOperator: "AND",
-                expanded: true,
-                children: [
-                    {
-                        nodeType: "CONDITION",
-                        itemParamId: "6",
-                        typeCheck: ">=",
-                        paramValue: "2024-01-01"
-                    }
-                ]
-            }
-        }
-    ]
+    generalName: '',
+    generalCondition: createEmptyTree(),
+    specificConditions: []
 };
 
 // Dialog state type
@@ -186,9 +149,29 @@ interface DialogState {
     tempCondition: TreeNode;
 }
 
+// Snackbar state type
+interface SnackbarState {
+    open: boolean;
+    message: string;
+    severity: 'success' | 'error' | 'info' | 'warning';
+}
+
 export default function App() {
-    const { control, handleSubmit, watch, setValue } = useForm<ConditionFormData>({
-        defaultValues: defaultFormValues
+    // TanStack Query hooks
+    const {
+        data: serverData,
+        isLoading,
+        isError,
+        error,
+        saveAll,
+        isSaving,
+    } = useConditions();
+
+    // React Hook Form with Yup validation
+    const { control, handleSubmit, watch, setValue, reset, formState: { errors } } = useForm<ConditionFormData>({
+        defaultValues: defaultFormValues,
+        resolver: yupResolver(conditionFormSchema) as any,
+        mode: 'onSubmit', // Validate on submit
     });
 
     const { append, remove } = useFieldArray({
@@ -196,8 +179,14 @@ export default function App() {
         name: 'specificConditions',
     });
 
-    const [savedData, setSavedData] = useState<ConditionFormData | null>(null);
+    // Local state
     const [showGeneralCondition, setShowGeneralCondition] = useState(true);
+    const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+    const [snackbar, setSnackbar] = useState<SnackbarState>({
+        open: false,
+        message: '',
+        severity: 'success',
+    });
 
     // Dialog state
     const [dialogState, setDialogState] = useState<DialogState>({
@@ -208,12 +197,31 @@ export default function App() {
         tempCondition: createEmptyTree(),
     });
 
+    // Sync server data to form when loaded
+    useEffect(() => {
+        if (serverData) {
+            reset(serverData);
+            setHasUnsavedChanges(false);
+        }
+    }, [serverData, reset]);
+
     const formData = watch();
     const specificConditions = formData.specificConditions || [];
+
+    // Show snackbar helper
+    const showSnackbar = (message: string, severity: SnackbarState['severity']) => {
+        setSnackbar({ open: true, message, severity });
+    };
+
+    // Mark as having unsaved changes
+    const markUnsaved = () => {
+        setHasUnsavedChanges(true);
+    };
 
     // Open dialog for viewing
     const handleView = (index: number) => {
         const condition = specificConditions[index];
+        if (!condition) return;
         setDialogState({
             open: true,
             mode: 'view',
@@ -226,6 +234,7 @@ export default function App() {
     // Open dialog for editing
     const handleEdit = (index: number) => {
         const condition = specificConditions[index];
+        if (!condition) return;
         setDialogState({
             open: true,
             mode: 'edit',
@@ -240,11 +249,13 @@ export default function App() {
         setDialogState(prev => ({ ...prev, open: false }));
     };
 
-    // Save changes from dialog
+    // Save changes from dialog (local only - not to server)
     const handleSaveDialog = () => {
         if (dialogState.index !== null) {
             setValue(`specificConditions.${dialogState.index}.name`, dialogState.tempName);
             setValue(`specificConditions.${dialogState.index}.condition`, dialogState.tempCondition);
+            markUnsaved();
+            showSnackbar('Đã cập nhật điều kiện riêng (chưa lưu xuống server)', 'info');
         }
     };
 
@@ -258,43 +269,180 @@ export default function App() {
         setDialogState(prev => ({ ...prev, tempCondition: condition }));
     };
 
+    // Add new specific condition (local only)
     const handleAddSpecific = () => {
         const newCondition: SpecificCondition = {
             id: Date.now().toString(),
             name: '',
-            condition: createEmptyTree()
+            condition: createEmptyTree(),
         };
         append(newCondition);
+        markUnsaved();
+        showSnackbar('Đã thêm điều kiện riêng (chưa lưu xuống server)', 'info');
+
         // Open edit dialog for new item
         setTimeout(() => {
             handleEdit(specificConditions.length);
         }, 100);
     };
 
+    // Delete specific condition (local only)
     const handleDeleteSpecific = (index: number) => {
         if (window.confirm('Bạn có chắc chắn muốn xóa điều kiện này?')) {
             remove(index);
+            markUnsaved();
+            showSnackbar('Đã xóa điều kiện riêng (chưa lưu xuống server)', 'info');
         }
     };
 
-    const onSubmit = (data: ConditionFormData) => {
-        setSavedData(data);
-        console.log('Form Data:', data);
+    // Save all data to server
+    const onSubmit = async (data: ConditionFormData) => {
+        // Custom validation: kiểm tra điều kiện chung có ít nhất 1 điều kiện
+        if (!validateTreeHasConditions(data.generalCondition)) {
+            showSnackbar('Điều kiện chung phải có ít nhất 1 điều kiện đã cấu hình đầy đủ', 'error');
+            return;
+        }
 
-        // Generate SQL cho điều kiện chung
-        const generalSQL = generateSQL(data.generalCondition, AVAILABLE_FIELDS);
-        console.log('General SQL:', generalSQL);
+        // Custom validation: kiểm tra các điều kiện riêng có tên và có ít nhất 1 điều kiện
+        for (let i = 0; i < data.specificConditions.length; i++) {
+            const spec = data.specificConditions[i];
+            if (!spec.name || spec.name.trim() === '') {
+                showSnackbar(`Điều kiện riêng #${i + 1} chưa có tên`, 'error');
+                return;
+            }
+            if (!validateTreeHasConditions(spec.condition)) {
+                showSnackbar(`Điều kiện riêng "${spec.name}" phải có ít nhất 1 điều kiện đã cấu hình đầy đủ`, 'error');
+                return;
+            }
+        }
 
-        // Generate SQL cho từng điều kiện riêng
-        data.specificConditions.forEach((spec, index) => {
-            const specificSQL = generateSQL(spec.condition, AVAILABLE_FIELDS);
-            console.log(`Specific ${index + 1} (${spec.name}):`, specificSQL);
-        });
+        try {
+            await saveAll.mutateAsync(data);
+            setHasUnsavedChanges(false);
+            showSnackbar('Lưu tất cả dữ liệu thành công!', 'success');
+            console.log('Saved Data:', data);
+
+            // Generate SQL cho điều kiện chung
+            const generalSQL = generateSQL(data.generalCondition, AVAILABLE_FIELDS);
+            console.log('General SQL:', generalSQL);
+
+            // Generate SQL cho từng điều kiện riêng
+            data.specificConditions.forEach((spec, index) => {
+                const specificSQL = generateSQL(spec.condition, AVAILABLE_FIELDS);
+                console.log(`Specific ${index + 1} (${spec.name}):`, specificSQL);
+            });
+        } catch (err) {
+            console.error('Save error:', err);
+            showSnackbar('Lỗi khi lưu dữ liệu!', 'error');
+        }
     };
+
+    // Handle form validation errors
+    const onError = (formErrors: any) => {
+        console.log('Validation errors:', formErrors);
+
+        if (formErrors.generalName) {
+            showSnackbar(formErrors.generalName.message || 'Tên điều kiện chung không hợp lệ', 'error');
+            return;
+        }
+
+        if (formErrors.generalCondition) {
+            showSnackbar('Điều kiện chung không hợp lệ', 'error');
+            return;
+        }
+
+        if (formErrors.specificConditions) {
+            showSnackbar('Một số điều kiện riêng không hợp lệ. Vui lòng kiểm tra lại.', 'error');
+            return;
+        }
+
+        showSnackbar('Dữ liệu không hợp lệ. Vui lòng kiểm tra lại.', 'error');
+    };
+
+    // Refresh data from server
+    const handleRefresh = () => {
+        if (hasUnsavedChanges) {
+            if (window.confirm('Bạn có thay đổi chưa lưu. Bạn có chắc muốn tải lại dữ liệu từ server?')) {
+                window.location.reload();
+            }
+        } else {
+            window.location.reload();
+        }
+    };
+
+    // Loading state
+    if (isLoading) {
+        return (
+            <ThemeProvider theme={theme}>
+                <CssBaseline />
+                <Box
+                    sx={{
+                        minHeight: '100vh',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        bgcolor: 'background.default',
+                    }}
+                >
+                    <Box sx={{ textAlign: 'center' }}>
+                        <CircularProgress size={60} />
+                        <Typography variant="h6" sx={{ mt: 2 }}>
+                            Đang tải dữ liệu từ server...
+                        </Typography>
+                    </Box>
+                </Box>
+            </ThemeProvider>
+        );
+    }
+
+    // Error state
+    if (isError) {
+        return (
+            <ThemeProvider theme={theme}>
+                <CssBaseline />
+                <Box
+                    sx={{
+                        minHeight: '100vh',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        bgcolor: 'background.default',
+                    }}
+                >
+                    <Alert severity="error" sx={{ maxWidth: 500 }}>
+                        <AlertTitle>Lỗi tải dữ liệu</AlertTitle>
+                        {error?.message || 'Không thể kết nối đến server'}
+                        <Button
+                            variant="outlined"
+                            color="error"
+                            size="small"
+                            sx={{ mt: 2 }}
+                            onClick={handleRefresh}
+                            startIcon={<Refresh />}
+                        >
+                            Thử lại
+                        </Button>
+                    </Alert>
+                </Box>
+            </ThemeProvider>
+        );
+    }
 
     return (
         <ThemeProvider theme={theme}>
             <CssBaseline />
+
+            {/* Loading Backdrop */}
+            <Backdrop
+                sx={{ color: '#fff', zIndex: (theme) => theme.zIndex.drawer + 1 }}
+                open={isSaving}
+            >
+                <Box sx={{ textAlign: 'center' }}>
+                    <CircularProgress color="inherit" />
+                    <Typography sx={{ mt: 2 }}>Đang lưu dữ liệu...</Typography>
+                </Box>
+            </Backdrop>
+
             <Box
                 sx={{
                     minHeight: '100vh',
@@ -305,12 +453,39 @@ export default function App() {
                 <Container maxWidth="lg">
                     {/* Header */}
                     <Paper elevation={3} sx={{ p: 4, mb: 3 }}>
-                        <Typography variant="h4" component="h1" fontWeight={700} gutterBottom>
-                            SQL Condition Builder
-                        </Typography>
-                        <Typography variant="body1" color="text.secondary" sx={{ mb: 4 }}>
-                            Xây dựng điều kiện SQL với điều kiện chung và các điều kiện riêng
-                        </Typography>
+                        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 2 }}>
+                            <Box>
+                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 1 }}>
+                                    <Typography variant="h4" component="h1" fontWeight={700}>
+                                        SQL Condition Builder
+                                    </Typography>
+                                    {hasUnsavedChanges && (
+                                        <Chip
+                                            label="Có thay đổi chưa lưu"
+                                            color="warning"
+                                            size="small"
+                                        />
+                                    )}
+                                </Box>
+                                <Typography variant="body1" color="text.secondary">
+                                    Xây dựng điều kiện SQL với điều kiện chung và các điều kiện riêng
+                                </Typography>
+                            </Box>
+                            <Button
+                                variant="outlined"
+                                startIcon={<Refresh />}
+                                onClick={handleRefresh}
+                                size="small"
+                            >
+                                Refresh
+                            </Button>
+                        </Box>
+
+                        {/* Status indicator */}
+                        <Alert severity="info" sx={{ mb: 4 }}>
+                            <strong>Lưu ý:</strong> Mọi thay đổi chỉ được lưu xuống database khi nhấn nút "Lưu tất cả".
+                            Thêm/Sửa/Xóa điều kiện riêng chỉ thay đổi trên giao diện.
+                        </Alert>
 
                         {/* Tên điều kiện chung */}
                         <Box sx={{ mb: 4 }}>
@@ -323,6 +498,12 @@ export default function App() {
                                         label="Tên điều kiện chung"
                                         fullWidth
                                         variant="outlined"
+                                        error={!!errors.generalName}
+                                        helperText={errors.generalName?.message}
+                                        onChange={(e) => {
+                                            field.onChange(e);
+                                            markUnsaved();
+                                        }}
                                     />
                                 )}
                             />
@@ -365,11 +546,22 @@ export default function App() {
                                         render={({ field }) => (
                                             <TreeBuilder
                                                 value={field.value}
-                                                onChange={field.onChange}
+                                                onChange={(value) => {
+                                                    field.onChange(value);
+                                                    markUnsaved();
+                                                }}
                                                 fields={AVAILABLE_FIELDS}
                                             />
                                         )}
                                     />
+                                    {errors.generalCondition && (
+                                        <FormHelperText error sx={{ mt: 1, display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                                            <ErrorIcon fontSize="small" />
+                                            {typeof errors.generalCondition.message === 'string'
+                                                ? errors.generalCondition.message
+                                                : 'Vui lòng cấu hình điều kiện chung'}
+                                        </FormHelperText>
+                                    )}
                                 </Box>
                             </Collapse>
                         </Paper>
@@ -387,15 +579,35 @@ export default function App() {
                             />
                         </Box>
 
+                        {/* Validation Errors Summary */}
+                        {Object.keys(errors).length > 0 && (
+                            <Alert severity="error" sx={{ mb: 3 }}>
+                                <AlertTitle>Có lỗi validation</AlertTitle>
+                                <List dense disablePadding>
+                                    {errors.generalName && (
+                                        <ListItem disablePadding>• {errors.generalName.message}</ListItem>
+                                    )}
+                                    {errors.generalCondition && (
+                                        <ListItem disablePadding>• Điều kiện chung không hợp lệ</ListItem>
+                                    )}
+                                    {errors.specificConditions && (
+                                        <ListItem disablePadding>• Một số điều kiện riêng không hợp lệ</ListItem>
+                                    )}
+                                </List>
+                            </Alert>
+                        )}
+
                         {/* Submit Button */}
                         <Button
                             variant="contained"
                             size="large"
-                            startIcon={<Save />}
-                            onClick={handleSubmit(onSubmit)}
+                            startIcon={isSaving ? <CircularProgress size={20} color="inherit" /> : <Save />}
+                            onClick={handleSubmit(onSubmit as any, onError)}
+                            disabled={isSaving}
+                            color={hasUnsavedChanges ? 'warning' : 'primary'}
                             sx={{ px: 4 }}
                         >
-                            Lưu tất cả
+                            {isSaving ? 'Đang lưu...' : hasUnsavedChanges ? 'Lưu tất cả (có thay đổi)' : 'Lưu tất cả'}
                         </Button>
                     </Paper>
 
@@ -442,7 +654,7 @@ export default function App() {
                                 </Typography>
                                 {specificConditions.map((spec, index) => (
                                     <Paper
-                                        key={index}
+                                        key={spec.id || index}
                                         elevation={0}
                                         sx={{
                                             p: 2,
@@ -485,29 +697,6 @@ export default function App() {
                         )}
                     </Paper>
 
-                    {/* Saved Data Preview */}
-                    {savedData && (
-                        <Paper elevation={3} sx={{ p: 4, mb: 3 }}>
-                            <Typography variant="h5" fontWeight={600} gutterBottom color="success.main">
-                                ✓ Dữ liệu đã lưu
-                            </Typography>
-                            <Paper
-                                elevation={0}
-                                sx={{
-                                    p: 2,
-                                    bgcolor: 'grey.100',
-                                    borderRadius: 2,
-                                    overflow: 'auto',
-                                    maxHeight: 300,
-                                }}
-                            >
-                                <pre style={{ margin: 0, fontSize: '0.75rem' }}>
-                                    {JSON.stringify(savedData, null, 2)}
-                                </pre>
-                            </Paper>
-                        </Paper>
-                    )}
-
                     {/* Instructions */}
                     <Alert
                         severity="info"
@@ -519,12 +708,11 @@ export default function App() {
                         <AlertTitle sx={{ fontWeight: 600 }}>Hướng dẫn</AlertTitle>
                         <List dense disablePadding>
                             {[
-                                'Nhập tên điều kiện chung và cấu hình logic điều kiện',
-                                'Thêm các điều kiện riêng bằng nút "Thêm điều kiện riêng"',
-                                'Click icon 👁️ để xem chi tiết (chỉ đọc)',
-                                'Click icon ✏️ để sửa điều kiện riêng',
-                                'Click icon 🗑️ để xóa điều kiện riêng',
-                                'Nhấn "Lưu tất cả" để lưu toàn bộ form',
+                                '📡 Dữ liệu được load từ server khi mở trang (GET API)',
+                                '➕ Thêm/✏️ Sửa/🗑️ Xóa điều kiện riêng → chỉ thay đổi trên giao diện',
+                                '💾 Nhấn "Lưu tất cả" → gọi PUT API lưu toàn bộ dữ liệu xuống database',
+                                '⚠️ Thay đổi chưa lưu sẽ hiển thị badge cảnh báo',
+                                '🔄 Refresh sẽ tải lại dữ liệu từ server (mất các thay đổi chưa lưu)',
                             ].map((text, index) => (
                                 <ListItem key={index} disablePadding sx={{ py: 0.25 }}>
                                     <ListItemIcon sx={{ minWidth: 32 }}>
@@ -553,6 +741,22 @@ export default function App() {
                 onConditionChange={handleTempConditionChange}
                 onSave={handleSaveDialog}
             />
+
+            {/* Snackbar for notifications */}
+            <Snackbar
+                open={snackbar.open}
+                autoHideDuration={4000}
+                onClose={() => setSnackbar(prev => ({ ...prev, open: false }))}
+                anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+            >
+                <Alert
+                    onClose={() => setSnackbar(prev => ({ ...prev, open: false }))}
+                    severity={snackbar.severity}
+                    sx={{ width: '100%' }}
+                >
+                    {snackbar.message}
+                </Alert>
+            </Snackbar>
         </ThemeProvider>
     );
 }
